@@ -1,6 +1,87 @@
 module Deps
 
-import Conda, JSON, TOML, Pkg, Dates, ..PythonCall
+import Conda, TOML, Pkg, Dates, ..PythonCall
+
+### CONFIG PARSING
+
+struct ConfigSection
+    dict::Dict{String,String}
+end
+ConfigSection() = ConfigSection(Dict{String,String}())
+Base.getindex(c::ConfigSection, k::String) = c.dict[k]
+Base.haskey(c::ConfigSection, k::String) = haskey(c.dict, k)
+Base.get(c::ConfigSection, k::String, d) = get(c.dict, k, d)
+Base.get(::Type{T}, c::ConfigSection, k::String) where {T} = haskey(c, k) ? config_parse(T, c[k]) : T()
+Base.get(::Type{T}, c::ConfigSection, k::String, d) where {T} = haskey(c, k) ? config_parse(T, c[k]) : d
+Base.setindex!(c::ConfigSection, v, k::String) = (c.dict[k] = config_string(v); c)
+
+config_string(v::AbstractString) = convert(String, v)
+config_string(v::Any) = string(v)
+config_string(v::AbstractVector) = join(map(config_string, v), "\n")
+
+config_parse(::Type{String}, v::String) = v
+config_parse(::Type{T}, v::String) where {T} = parse(T, v)
+config_parse(::Type{Vector}, v::String) = (x=split(v,'\n'); isempty(x[1]) && empty!(x); x)
+config_parse(::Type{Vector{T}}, v::String) where {T} = T[config_parse(T, String(x)) for x in config_parse(Vector, v)]
+
+struct Config
+    dict::Dict{String,ConfigSection}
+end
+Config() = Config(Dict{String,ConfigSection}())
+Base.getindex(c::Config, k::String) = get!(ConfigSection, c.dict, k)
+
+function read_config(io::IO)
+    conf::Config = Config()
+    sec::String = "default"
+    key::String = ""
+    for (n, line) in enumerate(eachline(io))
+        if isempty(line)
+            continue
+        elseif line[1] in ('#', ';')
+            continue
+        elseif line[1] == '['
+            line[end] == ']' || error("line $n: syntax error: expecting ']'")
+            sec = strip(line[2:prevind(line,end)])
+            key = ""
+        elseif isspace(line[1])
+            value = strip(line)
+            isempty(value) && continue
+            isempty(key) && error("line $n: syntax error: unexpected indent")
+            value0 = conf[sec][key]
+            if isempty(value0)
+                conf[sec][key] = value
+            else
+                conf[sec][key] = string(value0, "\n", value)
+            end
+        else
+            i = findfirst('=', line)
+            i === nothing && error("ilne $n: syntax error: expecting '='")
+            key = strip(line[1:prevind(line,i)])
+            isempty(key) && error("line $n: syntax error: empty key")
+            value = strip(line[i+1:end])
+            conf[sec][key] = value
+        end
+    end
+    return conf
+end
+
+function write_config(io::IO, conf::Config)
+    for (sec, csec) in conf.dict
+        println(io, "[", strip(sec), "]")
+        for (key, value) in csec.dict
+            values = split(value, "\n")
+            if length(values) == 1
+                println(io, strip(key), " = ", strip(values[1]))
+            else
+                println(io, strip(key), " = ")
+                for v in values
+                    println(io, "    ", strip(v))
+                end
+            end
+        end
+        println(io)
+    end
+end
 
 ### META
 
@@ -10,32 +91,10 @@ meta_file() = _meta_file[]
 
 function load_meta()
     fn = meta_file()
-    isfile(fn) ? open(JSON.parse, fn) : Dict{String,Any}()
+    isfile(fn) ? open(read_config, fn) : Config()
 end
 
-save_meta(meta) = open(io -> JSON.print(io, meta), meta_file(), "w")
-
-function get_meta(keys...)
-    meta = load_meta()
-    for key in keys
-        if haskey(meta, key)
-            meta = meta[key]
-        else
-            return
-        end
-    end
-    meta
-end
-
-function set_meta(args...)
-    length(args) < 2 && error("setmeta() takes at least 2 arguments")
-    here = meta = load_meta()
-    for key in args[1:end-2]
-        here = get!(Dict{String,Any}, here, key)
-    end
-    here[args[end-1]] = args[end]
-    save_meta(meta)
-end
+save_meta(meta) = open(io -> write_config(io, meta), meta_file(), "w")
 
 ### CONDA
 
@@ -150,17 +209,17 @@ function can_skip_resolve()
     # resolve if the conda environment doesn't exist yet
     isdir(conda_env()) || return false
     # resolve if we haven't resolved before
-    deps = get_meta("jldeps")
+    deps = get(load_meta().dict, "jldeps", nothing)
     deps === nothing && return false
     # resolve whenever the PythonCall version changes
-    version = get(deps, "version", nothing)
+    version = get(String, deps, "version", nothing)
     version === nothing && return false
     version != string(PythonCall.VERSION) && return false
     # resolve whenever any of the environments in the load_path changes
-    timestamp = get(deps, "timestamp", nothing)
+    timestamp = get(Float64, deps, "timestamp", nothing)
     timestamp === nothing && return false
     timestamp = max(timestamp, stat(meta_file()).mtime)
-    load_path = get(deps, "load_path", nothing)
+    load_path = get(Vector{String}, deps, "load_path", nothing)
     load_path === nothing && return false
     load_path != Base.load_path() && return false
     for env in Base.load_path()
@@ -286,13 +345,13 @@ function resolve(; create=true, force=false)
         env = conda_env()
         skip = !force && isdir(env)
         if skip
-            depinfo = get_meta("jldeps")
+            depinfo = load_meta()["jldeps"]
             skip &= (
-                conda_channels == get(depinfo, "conda_channels", nothing) &&
-                conda_packages == get(depinfo, "conda_packages", nothing) &&
-                pip_indexes == get(depinfo, "pip_indexes", nothing) &&
-                pip_packages == get(depinfo, "pip_packages", nothing) &&
-                scripts == get(depinfo, "scripts", nothing)
+                conda_channels == get(Vector{String}, depinfo, "conda_channels") &&
+                conda_packages == get(Vector{String}, depinfo, "conda_packages") &&
+                pip_indexes == get(Vector{String}, depinfo, "pip_indexes") &&
+                pip_packages == get(Vector{String}, depinfo, "pip_packages") &&
+                scripts == get(Vector{String}, depinfo, "scripts")
             )
         end
 
@@ -335,18 +394,18 @@ function resolve(; create=true, force=false)
         end
 
         # record what we did
-        depinfo = Dict(
-            "timestamp" => time(),
-            "load_path" => Base.load_path(),
-            "version" => string(PythonCall.VERSION),
-            "files" => all_deps_files,
-            "conda_packages" => conda_packages,
-            "conda_channels" => conda_channels,
-            "pip_packages" => pip_packages,
-            "pip_indexes" => pip_indexes,
-            "scripts" => scripts,
-        )
-        set_meta("jldeps", depinfo)
+        meta = load_meta()
+        jldeps = meta["jldeps"]
+        jldeps["timestamp"] = time()
+        jldeps["load_path"] = Base.load_path()
+        jldeps["version"] = PythonCall.VERSION
+        jldeps["files"] = all_deps_files
+        jldeps["conda_packages"] = conda_packages
+        jldeps["conda_channels"] = conda_channels
+        jldeps["pip_packages"] = pip_packages
+        jldeps["pip_indexes"] = pip_indexes
+        jldeps["scripts"] = scripts
+        save_meta(meta)
     end
 
     return

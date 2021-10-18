@@ -1,5 +1,5 @@
 Manifest.toml
-PythonCallMeta.json
+PythonCallMeta.cfg
 deps/deps.jl
 deps/build.log
 .ipynb_checkpoints
