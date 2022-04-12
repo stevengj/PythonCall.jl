@@ -10,7 +10,7 @@ A handle to a loaded instance of libpython, its interpreter, function pointers, 
     lib_ptr :: Ptr{Cvoid} = C_NULL
     exe_path :: Union{String, Missing} = missing
     lib_path :: Union{String, Missing} = missing
-    dlopen_flags :: UInt32 = RTLD_LAZY | RTLD_DEEPBIND | RTLD_GLOBAL
+    dlopen_flags :: UInt32 = RTLD_LAZY | RTLD_DEEPBIND | RTLD_LOCAL
     pyprogname :: Union{String, Missing} = missing
     pyprogname_w :: Any = missing
     pyhome :: Union{String, Missing} = missing
